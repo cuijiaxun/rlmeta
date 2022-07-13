@@ -75,5 +75,16 @@ class Controller(remote.Remotable):
             self._count += 1
             self._stats.extend(stats)
 
+class DummyController(Controller):
 
-ControllerLike = Union[Controller, remote.Remote]
+    def __init__(self, identifier: Optional[str] = None) -> None:
+        super().__init__(identifier)
+    
+    @remote.remote_method(batch_size=None)
+    def set_phase(self,
+                  phase: Phase,
+                  limit: Optional[int] = None,
+                  reset: bool = False) -> None:
+        pass
+
+ControllerLike = Union[Controller, remote.Remote, DummyController]
