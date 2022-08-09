@@ -15,6 +15,8 @@ class Phase(IntEnum):
     NONE = 0
     TRAIN = 1
     EVAL = 2
+    TRAIN_ATTACKER = 3
+    TRAIN_DETECTOR = 4
 
 
 class Controller(remote.Remotable):
