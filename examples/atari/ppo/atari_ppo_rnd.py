@@ -23,9 +23,13 @@ from rlmeta.agents.agent import AgentFactory
 from rlmeta.agents.ppo import PPORNDAgent
 from rlmeta.core.controller import Phase, Controller
 from rlmeta.core.loop import LoopList, ParallelLoop
-from rlmeta.core.model import wrap_downstream_model
+from rlmeta.core.model import ModelVersion, RemotableModelPool
+from rlmeta.core.model import make_remote_model, wrap_downstream_model
 from rlmeta.core.replay_buffer import ReplayBuffer, make_remote_replay_buffer
 from rlmeta.core.server import Server, ServerList
+from rlmeta.samplers import UniformSampler
+from rlmeta.storage import TensorCircularBuffer
+from rlmeta.utils.optimizer_utils import get_optimizer
 
 
 @hydra.main(config_path="./conf", config_name="conf_ppo")
@@ -34,24 +38,30 @@ def main(cfg):
 
     env = atari_wrappers.make_atari(cfg.env)
     train_model = AtariPPORNDModel(env.action_space.n).to(cfg.train_device)
-    optimizer = torch.optim.Adam(train_model.parameters(), lr=cfg.lr)
-
     infer_model = copy.deepcopy(train_model).to(cfg.infer_device)
+    optimizer = get_optimizer(cfg.optimizer.name, train_model.parameters(),
+                              cfg.optimizer.args)
 
     ctrl = Controller()
-    rb = ReplayBuffer(cfg.replay_buffer_size)
+    rb = ReplayBuffer(TensorCircularBuffer(cfg.replay_buffer_size),
+                      UniformSampler())
 
     m_server = Server(cfg.m_server_name, cfg.m_server_addr)
     r_server = Server(cfg.r_server_name, cfg.r_server_addr)
     c_server = Server(cfg.c_server_name, cfg.c_server_addr)
-    m_server.add_service(infer_model)
+    m_server.add_service(RemotableModelPool(infer_model))
     r_server.add_service(rb)
     c_server.add_service(ctrl)
     servers = ServerList([m_server, r_server, c_server])
 
     a_model = wrap_downstream_model(train_model, m_server)
-    t_model = remote_utils.make_remote(infer_model, m_server)
-    e_model = remote_utils.make_remote(infer_model, m_server)
+    t_model = make_remote_model(infer_model,
+                                m_server,
+                                version=ModelVersion.LATEST)
+    # During blocking evaluation we have STABLE is LATEST
+    e_model = make_remote_model(infer_model,
+                                m_server,
+                                version=ModelVersion.LATEST)
 
     a_ctrl = remote_utils.make_remote(ctrl, c_server)
     t_ctrl = remote_utils.make_remote(ctrl, c_server)
@@ -69,7 +79,7 @@ def main(cfg):
                         optimizer=optimizer,
                         batch_size=cfg.batch_size,
                         learning_starts=cfg.get("learning_starts", None),
-                        push_every_n_steps=cfg.push_every_n_steps)
+                        model_push_period=cfg.model_push_period)
     t_agent_fac = AgentFactory(PPORNDAgent, t_model, replay_buffer=t_rb)
     e_agent_fac = AgentFactory(PPORNDAgent, e_model, deterministic_policy=False)
 
@@ -107,7 +117,7 @@ def main(cfg):
                 stats.json(info, phase="Train", epoch=epoch, time=cur_time))
         time.sleep(1)
 
-        stats = agent.eval(cfg.num_eval_episodes)
+        stats = agent.eval(cfg.num_eval_episodes, keep_training_loops=True)
         cur_time = time.perf_counter() - start_time
         info = f"E Epoch {epoch}"
         if cfg.table_view:
@@ -115,9 +125,9 @@ def main(cfg):
         else:
             logging.info(
                 stats.json(info, phase="Eval", epoch=epoch, time=cur_time))
-        time.sleep(1)
 
         torch.save(train_model.state_dict(), f"ppo_rnd_agent-{epoch}.pth")
+        time.sleep(1)
 
     loops.terminate()
     servers.terminate()

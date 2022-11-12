@@ -3,7 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Tuple, Union
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -11,27 +11,32 @@ import torch.nn as nn
 
 class RunningRMS(nn.Module):
 
-    def __init__(self, size: Union[int, Tuple[int]]) -> None:
+    def __init__(self,
+                 size: Union[int, Tuple[int]],
+                 dtype: Optional[torch.dtype] = None) -> None:
         super().__init__()
         self._size = (size,) if isinstance(size, int) else size
-        self._count = 0
-        self.register_buffer("_mean_square", torch.zeros(self._size))
+        self.register_buffer("_count", torch.zeros(1, dtype=torch.int64))
+        self.register_buffer("_mean_square", torch.zeros(self._size,
+                                                         dtype=dtype))
 
     def reset(self) -> None:
-        self._count = 0
+        self._count.zero_()
         self._mean_square.zero_()
 
-    def count(self) -> int:
+    def count(self) -> torch.Tensor:
         return self._count
 
     def mean_square(self) -> torch.Tensor:
         return self._mean_square
 
-    def rms(self) -> torch.Tensor:
-        return self._mean_square.sqrt()
+    def rms(self, eps: Optional[float] = None) -> torch.Tensor:
+        return self._mean_square.sqrt() if eps is None else ((
+            self._mean_square + eps).sqrt())
 
-    def rrms(self) -> torch.Tensor:
-        return self._mean_square.rsqrt()
+    def rrms(self, eps: Optional[float] = None) -> torch.Tensor:
+        return self._mean_square.rsqrt() if eps is None else ((
+            self._mean_square + eps).rsqrt())
 
     def update(self, x: torch.Tensor) -> None:
         size = x.size()
@@ -49,19 +54,21 @@ class RunningRMS(nn.Module):
 
 class RunningMoments(nn.Module):
 
-    def __init__(self, size: Union[int, Tuple[int]]) -> None:
+    def __init__(self,
+                 size: Union[int, Tuple[int]],
+                 dtype: Optional[torch.dtype] = None) -> None:
         super().__init__()
         self._size = (size,) if isinstance(size, int) else size
-        self._m0 = 0
-        self.register_buffer("_m1", torch.zeros(self._size))
-        self.register_buffer("_m2", torch.zeros(self._size))
+        self.register_buffer("_m0", torch.zeros(1, dtype=torch.int64))
+        self.register_buffer("_m1", torch.zeros(self._size, dtype=dtype))
+        self.register_buffer("_m2", torch.zeros(self._size, dtype=dtype))
 
     def reset(self) -> None:
-        self._m0 = 0
+        self._m0.zero_()
         self._m1.zero_()
         self._m2.zero_()
 
-    def count(self) -> int:
+    def count(self) -> torch.Tensor:
         return self._m0
 
     def mean(self) -> torch.Tensor:
@@ -70,11 +77,13 @@ class RunningMoments(nn.Module):
     def var(self, ddof: int = 0) -> torch.Tensor:
         return self._m2 / (self._m0 - ddof)
 
-    def std(self, ddof: int = 0) -> torch.Tensor:
-        return self.var(ddof).sqrt()
+    def std(self, ddof: int = 0, eps: Optional[float] = None) -> torch.Tensor:
+        return self.var(ddof).sqrt() if eps is None else (self.var(ddof) +
+                                                          eps).sqrt()
 
-    def rstd(self, ddof: int = 0) -> torch.Tensor:
-        return self.var(ddof).rsqrt()
+    def rstd(self, ddof: int = 0, eps: Optional[float] = None) -> torch.Tensor:
+        return self.var(ddof).rsqrt() if eps is None else (self.var(ddof) +
+                                                           eps).rsqrt()
 
     def update(self, x: torch.Tensor) -> None:
         size = x.size()

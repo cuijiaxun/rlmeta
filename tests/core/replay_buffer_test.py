@@ -5,75 +5,90 @@
 
 import unittest
 
-import numpy as np
 import torch
 
 import rlmeta.utils.data_utils as data_utils
 
-from rlmeta.core.replay_buffer import ReplayBuffer, PrioritizedReplayBuffer
+from rlmeta.core.replay_buffer import ReplayBuffer
+from rlmeta.samplers import UniformSampler, PrioritizedSampler
+from rlmeta.storage import CircularBuffer, TensorCircularBuffer
 from tests.test_utils import TestCaseBase
 
 
 class ReplayBufferTest(TestCaseBase):
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.size = 8
         self.batch_size = 5
         self.hidden_dim = 4
 
+        self.replay_buffer = ReplayBuffer(
+            CircularBuffer(self.size, collate_fn=torch.stack), UniformSampler())
         self.flatten_data = dict(obs=torch.randn(self.batch_size,
                                                  self.hidden_dim),
                                  rew=torch.randn(self.batch_size))
         self.data = data_utils.unstack_fields(self.flatten_data,
                                               self.batch_size)
 
-    def test_extend(self):
-        replay_buffer = ReplayBuffer(self.size)
+    def test_extend(self) -> None:
+        self.replay_buffer.reset()
 
-        index = replay_buffer._extend(self.data)
-        expected_index = np.arange(self.batch_size)
-        self.assertEqual(replay_buffer.cursor, self.batch_size % self.size)
-        self.assertEqual(len(replay_buffer), self.batch_size)
-        self.assert_tensor_equal(index, expected_index)
-        data = replay_buffer[index]
+        keys = self.replay_buffer.extend(self.data)
+        expected_keys = torch.arange(self.batch_size)
+        self.assertEqual(len(self.replay_buffer), self.batch_size)
+        self.assert_tensor_equal(keys, expected_keys)
+        data = self.replay_buffer.get(keys)
         self.assertEqual(data.keys(), self.flatten_data.keys())
         for k, v in data.items():
             self.assert_tensor_equal(v, self.flatten_data[k])
 
-        index = replay_buffer._extend(self.data)
-        d = self.size - self.batch_size
-        expected_index = np.empty(self.batch_size, dtype=np.int64)
-        for i in range(d):
-            expected_index[i] = self.batch_size + i
-        for i in range(self.batch_size - d):
-            expected_index[d + i] = i
-        self.assertEqual(replay_buffer.cursor, self.batch_size * 2 % self.size)
-        self.assertEqual(len(replay_buffer), self.size)
-        self.assert_tensor_equal(index, expected_index)
-        if d > 0:
-            index1 = index[:d]
-            data1 = replay_buffer[index1]
-            self.assertEqual(data1.keys(), self.flatten_data.keys())
-            for k, v in data1.items():
-                self.assert_tensor_equal(v, self.flatten_data[k][:d])
-        if d < self.batch_size:
-            index2 = index[d:]
-            data2 = replay_buffer[index2]
-            for k, v in data2.items():
-                self.assert_tensor_equal(v, self.flatten_data[k][d:])
+        keys = self.replay_buffer.extend(self.data)
+        self.assertEqual(len(self.replay_buffer), self.size)
+        self.assert_tensor_equal(keys, expected_keys + self.batch_size)
+        data = self.replay_buffer.get(keys)
+        self.assertEqual(data.keys(), self.flatten_data.keys())
+        for k, v in data.items():
+            self.assert_tensor_equal(v, self.flatten_data[k])
 
-    def test_sample(self):
-        replay_buffer = ReplayBuffer(self.size)
-        # Only add 1 data into replay_buffer,
-        # so the sample output should be the same.
-        replay_buffer.append(self.data[0])
-        batch = replay_buffer.sample(self.batch_size)
-        self.assertEqual(data_utils.size(batch["obs"])[0], self.batch_size)
-        self.assertEqual(data_utils.size(batch["rew"])[0], self.batch_size)
-        self.assertEqual(batch.keys(), self.flatten_data.keys())
-        for k, v in batch.items():
-            for i in range(self.batch_size):
-                self.assert_tensor_equal(v[i], self.flatten_data[k][0])
+    def test_sample(self) -> None:
+        self.replay_buffer.reset()
+        self.replay_buffer.extend(self.data)
+
+        prob = 1.0 / self.batch_size
+
+        num_samples = self.batch_size
+        keys, _, probs = self.replay_buffer.sample(num_samples)
+        expected_probs = torch.full_like(probs, prob)
+        self.assert_tensor_equal(probs, expected_probs)
+        count = torch.bincount(keys)
+        self.assertEqual(count.max().item(), 1)
+        count = torch.zeros(self.batch_size, dtype=torch.int64)
+        for _ in range(20000):
+            keys, _, _ = self.replay_buffer.sample(3)
+            count[keys] += 1
+        actual_probs = count / count.sum()
+        expected_probs = torch.full_like(actual_probs, prob)
+        self.assert_tensor_close(actual_probs, expected_probs, atol=0.05)
+
+        # Test sample with replacement.
+        num_samples = 20000
+        keys, _, probs = self.replay_buffer.sample(num_samples,
+                                                   replacement=True)
+        self.assert_tensor_equal(
+            probs, torch.full((num_samples,), prob, dtype=torch.float64))
+        actual_probs = torch.bincount(keys).float() / num_samples
+        expected_probs = torch.full_like(actual_probs, prob)
+        self.assert_tensor_close(actual_probs, expected_probs, atol=0.05)
+
+    def test_clear(self) -> None:
+        self.replay_buffer.reset()
+
+        self.replay_buffer.extend(self.data)
+        self.assertEqual(len(self.replay_buffer), len(self.data))
+        self.replay_buffer.clear()
+        self.assertEqual(len(self.replay_buffer), 0)
+        self.replay_buffer.extend(self.data)
+        self.assertEqual(len(self.replay_buffer), len(self.data))
 
 
 class PrioritizedReplayBufferTest(TestCaseBase):
@@ -89,88 +104,94 @@ class PrioritizedReplayBufferTest(TestCaseBase):
         self.data = data_utils.unstack_fields(self.flatten_data,
                                               self.batch_size)
 
-        self.alpha = 0.8
-        self.beta = 0.5
-
-        self.rtol = 1e-6
-        self.atol = 1e-6
-
     def test_extend(self):
-        replay_buffer = PrioritizedReplayBuffer(self.size, self.alpha,
-                                                self.beta)
-        index = replay_buffer._extend(self.data)
-        expected_index = np.arange(self.batch_size)
-        expected_weights = torch.ones(self.batch_size)
+        replay_buffer = ReplayBuffer(TensorCircularBuffer(self.size),
+                                     PrioritizedSampler(priority_exponent=0.6))
+        keys = replay_buffer.extend(self.data)
+        expected_keys = torch.arange(self.batch_size)
         self.assertEqual(len(replay_buffer), self.batch_size)
-        self.assert_tensor_equal(index, expected_index)
-        data, weights = replay_buffer[index]
+        self.assert_tensor_equal(keys, expected_keys)
+        data = replay_buffer.get(keys)
         self.assertEqual(data.keys(), self.flatten_data.keys())
         for k, v in data.items():
             self.assert_tensor_equal(v, self.flatten_data[k])
-        self.assert_tensor_equal(weights, expected_weights)
 
-        index = replay_buffer._extend(self.data)
-        d = self.size - self.batch_size
-        expected_index = np.empty(self.batch_size, dtype=np.int64)
-        expected_weights = torch.ones(self.batch_size)
-        for i in range(d):
-            expected_index[i] = self.batch_size + i
-        for i in range(self.batch_size - d):
-            expected_index[d + i] = i
+        keys = replay_buffer.extend(self.data)
         self.assertEqual(len(replay_buffer), self.size)
-        self.assert_tensor_equal(index, expected_index)
-        if d > 0:
-            index1 = index[:d]
-            data1, weights1 = replay_buffer[index1]
-            self.assertEqual(data1.keys(), self.flatten_data.keys())
-            for k, v in data1.items():
-                self.assert_tensor_equal(v, self.flatten_data[k][:d])
-            self.assert_tensor_equal(weights1, expected_weights[:d])
-        if d < self.batch_size:
-            index2 = index[d:]
-            data2, weights2 = replay_buffer[index2]
-            for k, v in data2.items():
-                self.assert_tensor_equal(v, self.flatten_data[k][d:])
-            self.assert_tensor_equal(weights2, expected_weights[d:])
-
-    def test_update_priority(self):
-        replay_buffer = PrioritizedReplayBuffer(self.size, self.alpha,
-                                                self.beta)
-        replay_buffer._extend(self.data)
-        replay_buffer._extend(self.data)
-
-        index = torch.arange(self.size)
-        weight = torch.rand(self.size) * 3.0
-        expected_weights = torch.pow(weight, self.alpha)
-        expected_weights = torch.pow(expected_weights / expected_weights.min(),
-                                     -self.beta)
-        expected_max_weight = weight.max()
-        replay_buffer.update_priority(index, weight)
-        _, cur_weights = replay_buffer[index]
-        self.assert_tensor_close(cur_weights, expected_weights, self.rtol,
-                                 self.atol)
-        self.assertAlmostEqual(replay_buffer.max_priority,
-                               expected_max_weight,
-                               delta=self.atol)
+        self.assert_tensor_equal(keys, expected_keys + self.batch_size)
+        data = replay_buffer.get(keys)
+        self.assertEqual(data.keys(), self.flatten_data.keys())
+        for k, v in data.items():
+            self.assert_tensor_equal(v, self.flatten_data[k])
 
     def test_sample(self):
-        replay_buffer = PrioritizedReplayBuffer(self.size, self.alpha,
-                                                self.beta)
-        replay_buffer._extend(self.data)
-        replay_buffer._extend(self.data)
+        replay_buffer = ReplayBuffer(TensorCircularBuffer(self.size),
+                                     PrioritizedSampler(priority_exponent=1.0))
+        priorities = torch.rand((self.batch_size,)) * 10
+        expected_probs = priorities / priorities.sum()
+        replay_buffer.extend(self.data, priorities=priorities)
 
-        index = torch.arange(self.size)
-        weight = torch.rand(self.size)
-        expected_weight = torch.pow(weight, self.alpha)
-        expected_weight = torch.pow(
-            (expected_weight * self.size) / (expected_weight.min() * self.size),
-            -self.beta)
+        # Test sample without replacement
+        num_samples = self.batch_size
+        keys, _, probs = replay_buffer.sample(num_samples)
+        self.assert_tensor_close(probs,
+                                 expected_probs[keys],
+                                 rtol=1e-6,
+                                 atol=1e-6)
+        count = torch.bincount(keys)
+        self.assertEqual(count.max().item(), 1)
+        count = torch.zeros(self.batch_size, dtype=torch.int64)
+        for _ in range(100000):
+            keys, _, _ = replay_buffer.sample(3)
+            count[keys] += 1
+        actual_probs = count / count.sum()
+        self.assert_tensor_close(actual_probs, expected_probs, atol=0.1)
 
-        replay_buffer.update_priority(index, weight)
-        _, cur_weight, cur_index, cur_timestamp = replay_buffer.sample(
-            self.batch_size)
-        self.assert_tensor_close(cur_weight, expected_weight[cur_index],
-                                 self.rtol, self.atol)
+        # Test sample with replacement.
+        num_samples = 100000
+        keys, _, probs = replay_buffer.sample(num_samples, replacement=True)
+        actual_probs = torch.bincount(keys).float() / num_samples
+        self.assert_tensor_close(probs, expected_probs[keys], rtol=1e-6)
+        self.assert_tensor_close(actual_probs, expected_probs, atol=0.05)
+
+    def test_update(self):
+        alpha = 0.6
+        replay_buffer = ReplayBuffer(
+            TensorCircularBuffer(self.size),
+            PrioritizedSampler(priority_exponent=alpha))
+        priorities = torch.rand((self.batch_size,)) * 10
+        keys = replay_buffer.extend(self.data, priorities=priorities)
+        priorities = torch.rand((self.batch_size,)) * 10
+        expected_probs = priorities.pow(alpha)
+        expected_probs.div_(expected_probs.sum())
+        replay_buffer.update(keys, priorities)
+
+        num_samples = 100
+        keys, _, probs = replay_buffer.sample(num_samples, replacement=True)
+        self.assert_tensor_close(probs, expected_probs[keys], rtol=1e-6)
+
+    def test_reset(self) -> None:
+        replay_buffer = ReplayBuffer(TensorCircularBuffer(self.size),
+                                     PrioritizedSampler(priority_exponent=0.6))
+        replay_buffer.extend(self.data)
+        self.assertEqual(len(replay_buffer), len(self.data))
+        replay_buffer.reset()
+        self.assertEqual(len(replay_buffer), 0)
+        self.assertFalse(replay_buffer._storage._impl.initialized)
+        replay_buffer.extend(self.data)
+        self.assertEqual(len(replay_buffer), len(self.data))
+
+    def test_clear(self) -> None:
+        replay_buffer = ReplayBuffer(TensorCircularBuffer(self.size),
+                                     PrioritizedSampler(priority_exponent=0.6))
+
+        replay_buffer.extend(self.data)
+        self.assertEqual(len(replay_buffer), len(self.data))
+        replay_buffer.clear()
+        self.assertEqual(len(replay_buffer), 0)
+        self.assertTrue(replay_buffer._storage._impl.initialized)
+        replay_buffer.extend(self.data)
+        self.assertEqual(len(replay_buffer), len(self.data))
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ from math import prod
 import numpy as np
 import torch
 
-from rlmeta.data import SumSegmentTree, MinSegmentTree
+from rlmeta.data import SumSegmentTree
 from tests.test_utils import TestCaseBase
 
 
@@ -62,6 +62,19 @@ class SumSegmentTreeTest(TestCaseBase):
         value = torch.randn(self.query_size)
         self.segment_tree.update(index, value)
         self.assert_tensor_equal(self.segment_tree[index], value)
+        self.segment_tree[index] = origin_value
+
+    def test_masked_update(self) -> None:
+        weights = torch.ones(self.size)
+        index = weights.multinomial(prod(self.query_size), replacement=False)
+        index = index.view(self.query_size)
+        origin_value = self.segment_tree[index]
+        mask = torch.randint(2, size=self.query_size, dtype=torch.bool)
+
+        value = torch.randn(self.query_size)
+        self.segment_tree.update(index, value, mask)
+        self.assert_tensor_equal(self.segment_tree[index],
+                                 torch.where(mask, value, origin_value))
         self.segment_tree[index] = origin_value
 
     def test_query(self) -> None:
