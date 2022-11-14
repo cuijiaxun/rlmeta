@@ -173,14 +173,14 @@ class RemoteModel(remote.Remote):
                      replacement: bool = False) -> torch.Tensor:
         return self.client.sync(self.server_name,
                                 self.remote_method_name("sample_model"),
-                                num_samples, replacement)
+                                ) 
 
     async def async_sample_model(self,
                                  num_samples: int = 1,
                                  replacement: bool = False) -> torch.Tensor:
         return await self.client.async_(self.server_name,
                                         self.remote_method_name("sample_model"),
-                                        num_samples, replacement)
+                                        )
 
     def _bind(self) -> None:
         for method in self._remote_methods:
@@ -265,14 +265,16 @@ class DownstreamModel(remote.Remote):
                      replacement: bool = False) -> torch.Tensor:
         return self.client.sync(self.server_name,
                                 self.remote_method_name("sample_model"),
-                                num_samples, replacement)
+                                num_samples, replacement
+                                )
 
     async def async_sample_model(self,
                                  num_samples: int = 1,
                                  replacement: bool = False) -> torch.Tensor:
         return await self.client.async_(self.server_name,
                                         self.remote_method_name("sample_model"),
-                                        num_samples, replacement)
+                                        num_samples, replacement
+                                        )
 
     def _bind(self) -> None:
         pass
