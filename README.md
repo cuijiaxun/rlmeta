@@ -10,8 +10,9 @@ To build from source, please install [`PyTorch`](https://pytorch.org/) first,
 and then run the commands below.
 
 ```
-$ git clone https://github.com/facebookresearch/rlmeta
+$ git clone https://github.com/cuijiaxun/rlmeta
 $ cd rlmeta
+$ git checkout marl
 $ git submodule sync && git submodule update --init --recursive
 $ pip install -e .
 ```
